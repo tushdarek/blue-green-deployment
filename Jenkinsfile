@@ -183,7 +183,7 @@ stage('Deploy to Inactive Environment') {
                         returnStdout: true
                     ).trim()
 
-                    sleep 5
+                    sleep 30
 
                     def liveStatus = sh(
                         script: "curl -s -o /dev/null -w \"%{http_code}\" http://${albDns}/health",
