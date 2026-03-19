@@ -74,26 +74,28 @@ pipeline {
             }
         }
 
-        stage('Deploy to Inactive Environment') {
-            steps {
-                sshagent(credentials: ['EC2_SSH_KEY']) {
-                    sh """
-                        echo "🚢 Deploying ${params.APP_VERSION} to ${env.INACTIVE_ENV.toUpperCase()} (${env.DEPLOY_IP})..."
+stage('Deploy to Inactive Environment') {
+    steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'EC2_SSH_KEY', keyFileVariable: 'SSH_KEY_FILE')]) {
+            sh """
+                chmod 400 \$SSH_KEY_FILE
 
-                        scp -o StrictHostKeyChecking=no -r ./dist/* \
-                            ec2-user@${env.DEPLOY_IP}:/var/www/html/
+                scp -i \$SSH_KEY_FILE \
+                    -o StrictHostKeyChecking=no -r ./dist/* \
+                    ec2-user@${env.DEPLOY_IP}:/var/www/html/
 
-                        ssh -o StrictHostKeyChecking=no ec2-user@${env.DEPLOY_IP} '
-                            echo "${params.APP_VERSION}" | sudo tee /var/www/html/version
-                            sudo systemctl restart httpd
-                            sudo systemctl status httpd --no-pager
-                        '
+                ssh -i \$SSH_KEY_FILE \
+                    -o StrictHostKeyChecking=no ec2-user@${env.DEPLOY_IP} '
+                        echo "${params.APP_VERSION}" | sudo tee /var/www/html/version
+                        sudo systemctl restart httpd
+                        sudo systemctl status httpd --no-pager
+                    '
 
-                        echo "✅ Deployment to ${env.INACTIVE_ENV.toUpperCase()} complete."
-                    """
-                }
-            }
+                echo "✅ Deployment to ${env.INACTIVE_ENV.toUpperCase()} complete."
+            """
         }
+    }
+}
 
         stage('Health Check') {
             steps {
