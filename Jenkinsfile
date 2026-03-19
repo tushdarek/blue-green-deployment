@@ -2,26 +2,29 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION          = 'eu-north-1'
-        ALB_ARN             = credentials('ALB_ARN')
-        LISTENER_ARN        = credentials('LISTENER_ARN')
-        BLUE_TG_ARN         = credentials('BLUE_TG_ARN')
-        GREEN_TG_ARN        = credentials('GREEN_TG_ARN')
-        BLUE_EC2_IP         = credentials('BLUE_EC2_IP')
-        GREEN_EC2_IP        = credentials('GREEN_EC2_IP')
+        AWS_REGION           = 'eu-north-1'
+        ALB_ARN              = credentials('ALB_ARN')
+        LISTENER_ARN         = credentials('LISTENER_ARN')
+        BLUE_TG_ARN          = credentials('BLUE_TG_ARN')
+        GREEN_TG_ARN         = credentials('GREEN_TG_ARN')
+        BLUE_EC2_IP          = credentials('BLUE_EC2_IP')
+        GREEN_EC2_IP         = credentials('GREEN_EC2_IP')
         HEALTH_CHECK_RETRIES = '5'
-        HEALTH_CHECK_DELAY  = '10'
-        APP_PORT            = '80'
+        HEALTH_CHECK_DELAY   = '10'
+        APP_PORT             = '80'
     }
 
     parameters {
-        string(name: 'APP_VERSION', defaultValue: 'v2.0', description: 'Version to deploy')
+        string(name: 'APP_VERSION', defaultValue: 'v2.0',    description: 'Version to deploy')
         string(name: 'GITHUB_REPO', defaultValue: 'https://github.com/tushdarek/blue-green-deployment.git', description: 'Source repo URL')
-        string(name: 'BRANCH', defaultValue: 'main', description: 'Branch to deploy')
+        string(name: 'BRANCH',      defaultValue: 'main',    description: 'Branch to deploy')
     }
 
     stages {
 
+        // ─────────────────────────────────────────────
+        // STAGE 1 - Detect Active Environment
+        // ─────────────────────────────────────────────
         stage('Detect Active Environment') {
             steps {
                 script {
@@ -52,51 +55,68 @@ pipeline {
                         env.DEPLOY_IP       = env.BLUE_EC2_IP
                     }
 
-                    echo "✅ Active: ${env.ACTIVE_ENV.toUpperCase()} → Deploying to: ${env.INACTIVE_ENV.toUpperCase()} (${env.DEPLOY_IP})"
+                    echo "✅ Active: ${env.ACTIVE_ENV.toUpperCase()} → Deploying to: ${env.INACTIVE_ENV.toUpperCase()}"
                 }
             }
         }
 
+        // ─────────────────────────────────────────────
+        // STAGE 2 - Checkout Code
+        // ─────────────────────────────────────────────
         stage('Checkout Code') {
             steps {
-                echo "📥 Checking out code..."
-                git branch: params.BRANCH, url: params.GITHUB_REPO
+                echo "📥 Code already checked out by Jenkins SCM."
             }
         }
 
+        // ─────────────────────────────────────────────
+        // STAGE 3 - Build Application
+        // ─────────────────────────────────────────────
         stage('Build Application') {
             steps {
                 echo "🔨 Building version ${params.APP_VERSION}..."
                 sh '''
-                    echo "Build step complete."
+                    echo "Build complete."
                     ls -la dist/
                 '''
             }
         }
 
-stage('Deploy to Inactive Environment') {
-    steps {
-        withCredentials([sshUserPrivateKey(credentialsId: 'EC2_SSH_KEY', keyFileVariable: 'SSH_KEY_FILE')]) {
-            sh """
-                chmod 400 \$SSH_KEY_FILE
+        // ─────────────────────────────────────────────
+        // STAGE 4 - Deploy to Inactive Environment
+        // ─────────────────────────────────────────────
+        stage('Deploy to Inactive Environment') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: 'EC2_SSH_KEY', keyFileVariable: 'SSH_KEY_FILE')]) {
+                    sh """
+                        chmod 400 \$SSH_KEY_FILE
 
-                scp -i \$SSH_KEY_FILE \
-                    -o StrictHostKeyChecking=no -r ./dist/* \
-                    ec2-user@${env.DEPLOY_IP}:/var/www/html/
+                        echo "🚢 Deploying ${params.APP_VERSION} to ${env.INACTIVE_ENV.toUpperCase()} (${env.DEPLOY_IP})..."
 
-                ssh -i \$SSH_KEY_FILE \
-                    -o StrictHostKeyChecking=no ec2-user@${env.DEPLOY_IP} '
-                        echo "${params.APP_VERSION}" | sudo tee /var/www/html/version
-                        sudo systemctl restart httpd
-                        sudo systemctl status httpd --no-pager
-                    '
+                        # Copy application files
+                        scp -i \$SSH_KEY_FILE \
+                            -o StrictHostKeyChecking=no \
+                            -r ./dist/health ./dist/index.html ./dist/version \
+                            ec2-user@${env.DEPLOY_IP}:/var/www/html/
 
-                echo "✅ Deployment to ${env.INACTIVE_ENV.toUpperCase()} complete."
-            """
+                        # Update version and restart web server
+                        ssh -i \$SSH_KEY_FILE \
+                            -o StrictHostKeyChecking=no \
+                            ec2-user@${env.DEPLOY_IP} '
+                                echo "${params.APP_VERSION}" | sudo tee /var/www/html/version
+                                sudo systemctl restart httpd
+                                sudo systemctl status httpd --no-pager
+                            '
+
+                        echo "✅ Deployment to ${env.INACTIVE_ENV.toUpperCase()} complete."
+                    """
+                }
+            }
         }
-    }
-}
 
+        // ─────────────────────────────────────────────
+        // STAGE 5 - Health Check on Inactive Env
+        // ─────────────────────────────────────────────
         stage('Health Check') {
             steps {
                 script {
@@ -150,6 +170,9 @@ stage('Deploy to Inactive Environment') {
             }
         }
 
+        // ─────────────────────────────────────────────
+        // STAGE 6 - Switch ALB Traffic
+        // ─────────────────────────────────────────────
         stage('Switch ALB Traffic') {
             steps {
                 script {
@@ -167,10 +190,13 @@ stage('Deploy to Inactive Environment') {
             }
         }
 
+        // ─────────────────────────────────────────────
+        // STAGE 7 - Post-Switch Validation with Retries
+        // ─────────────────────────────────────────────
         stage('Post-Switch Validation') {
             steps {
                 script {
-                    echo "🔎 Validating via ALB endpoint..."
+                    echo "🔎 Waiting for ALB to mark targets healthy..."
 
                     def albDns = sh(
                         script: """
@@ -183,23 +209,45 @@ stage('Deploy to Inactive Environment') {
                         returnStdout: true
                     ).trim()
 
-                    sleep 30
+                    echo "ALB DNS: http://${albDns}"
 
-                    def liveStatus = sh(
-                        script: "curl -s -o /dev/null -w \"%{http_code}\" http://${albDns}/health",
-                        returnStdout: true
-                    ).trim()
+                    // Wait for ALB target registration and health check cycle
+                    echo "⏳ Waiting 90 seconds for ALB target health propagation..."
+                    sleep 90
 
-                    if (liveStatus != '200') {
-                        error("❌ Post-switch validation failed (HTTP ${liveStatus}). Initiating rollback.")
+                    // Retry validation up to 5 times with 20s gap
+                    def validated = false
+                    for (int i = 1; i <= 5; i++) {
+                        echo "Validation attempt ${i} of 5..."
+
+                        def liveStatus = sh(
+                            script: "curl -s -o /dev/null -w \"%{http_code}\" http://${albDns}/health",
+                            returnStdout: true
+                        ).trim()
+
+                        echo "ALB response: HTTP ${liveStatus}"
+
+                        if (liveStatus == '200') {
+                            validated = true
+                            echo "✅ Validation passed! Live URL: http://${albDns}"
+                            break
+                        }
+
+                        echo "⏳ Not ready yet (HTTP ${liveStatus}) — waiting 20s before retry..."
+                        sleep 20
                     }
 
-                    echo "✅ Validation passed. Live URL: http://${albDns}"
+                    if (!validated) {
+                        error("❌ Post-switch validation failed after all retries. Initiating rollback.")
+                    }
                 }
             }
         }
     }
 
+    // ─────────────────────────────────────────────
+    // POST - Rollback on failure / notify on success
+    // ─────────────────────────────────────────────
     post {
         failure {
             script {
