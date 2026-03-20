@@ -9,13 +9,13 @@ pipeline {
 
     environment {
         // YOUR AWS RESOURCES - Update these with your actual values
-        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:listener/app/BlueGreen-ALB/fdff715c8fc7384b/98278ba4dd2f1f70'
-        BLUE_TG_ARN   = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:targetgroup/TG-Blue/ad4a682e102029d0'
-        GREEN_TG_ARN  = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:targetgroup/TG-Green/a5e3d80cb9ca8ead'
+        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:loadbalancer/app/BlueGreen-ALB/c43469f376ace0e9'
+        BLUE_TG_ARN   = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:targetgroup/TG-Blue/1b9b9dc59587436b'
+        GREEN_TG_ARN  = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:targetgroup/TG-Green/00e48e7f78dbd3ac'
         
         // Your EC2 Instance IPs
-        BLUE_IP       = '13.203.201.44'
-        GREEN_IP      = '13.203.154.72'
+        BLUE_IP       = '13.201.124.219'
+        GREEN_IP      = '65.0.55.222'
         
         // Application Configuration
         APP_PORT = '80'
@@ -26,7 +26,7 @@ pipeline {
         stage('Checkout Code') {
             steps {
                 git branch: 'main', 
-                    url: 'https://github.com/aniketchougule108/Blue-Green-Deployment-Project-Jenkins.git'
+                    url: 'https://github.com/tushdarek/blue-green-deployment.git'
                 echo "✅ Code checked out from GitHub"
             }
         }
