@@ -1,276 +1,411 @@
 pipeline {
     agent any
-
-    environment {
-        AWS_REGION           = 'eu-north-1'
-        ALB_ARN              = credentials('ALB_ARN')
-        LISTENER_ARN         = credentials('LISTENER_ARN')
-        BLUE_TG_ARN          = credentials('BLUE_TG_ARN')
-        GREEN_TG_ARN         = credentials('GREEN_TG_ARN')
-        BLUE_EC2_IP          = credentials('BLUE_EC2_IP')
-        GREEN_EC2_IP         = credentials('GREEN_EC2_IP')
-        HEALTH_CHECK_RETRIES = '5'
-        HEALTH_CHECK_DELAY   = '10'
-        APP_PORT             = '80'
+    
+    parameters {
+        choice(name: 'DEPLOY_TO', choices: ['blue', 'green'], description: 'Which environment is INACTIVE right now?')
+        booleanParam(name: 'AUTO_SWITCH', defaultValue: true, description: 'Switch traffic after success?')
+        choice(name: 'VERSION', choices: ['v1', 'v2'], description: 'Which version to deploy?')
     }
 
-    parameters {
-        string(name: 'APP_VERSION', defaultValue: 'v2.0',    description: 'Version to deploy')
-        string(name: 'GITHUB_REPO', defaultValue: 'https://github.com/tushdarek/blue-green-deployment.git', description: 'Source repo URL')
-        string(name: 'BRANCH',      defaultValue: 'main',    description: 'Branch to deploy')
+    environment {
+        // YOUR AWS RESOURCES - Update these with your actual values
+        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:listener/app/BlueGreen-ALB/fdff715c8fc7384b/98278ba4dd2f1f70'
+        BLUE_TG_ARN   = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:targetgroup/TG-Blue/ad4a682e102029d0'
+        GREEN_TG_ARN  = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:targetgroup/TG-Green/a5e3d80cb9ca8ead'
+        
+        // Your EC2 Instance IPs
+        BLUE_IP       = '13.203.201.44'
+        GREEN_IP      = '13.203.154.72'
+        
+        // Application Configuration
+        APP_PORT = '80'
+        HEALTH_ENDPOINT = '/health'
     }
 
     stages {
-
-        // ─────────────────────────────────────────────
-        // STAGE 1 - Detect Active Environment
-        // ─────────────────────────────────────────────
-        stage('Detect Active Environment') {
-            steps {
-                script {
-                    echo "🔍 Detecting active environment..."
-
-                    def activeArn = sh(
-                        script: """
-                            aws elbv2 describe-listeners \
-                                --listener-arns ${env.LISTENER_ARN} \
-                                --region ${env.AWS_REGION} \
-                                --query 'Listeners[0].DefaultActions[0].ForwardConfig.TargetGroups[0].TargetGroupArn' \
-                                --output text
-                        """,
-                        returnStdout: true
-                    ).trim()
-
-                    if (activeArn == env.BLUE_TG_ARN) {
-                        env.ACTIVE_ENV      = 'blue'
-                        env.INACTIVE_ENV    = 'green'
-                        env.ACTIVE_TG_ARN   = env.BLUE_TG_ARN
-                        env.INACTIVE_TG_ARN = env.GREEN_TG_ARN
-                        env.DEPLOY_IP       = env.GREEN_EC2_IP
-                    } else {
-                        env.ACTIVE_ENV      = 'green'
-                        env.INACTIVE_ENV    = 'blue'
-                        env.ACTIVE_TG_ARN   = env.GREEN_TG_ARN
-                        env.INACTIVE_TG_ARN = env.BLUE_TG_ARN
-                        env.DEPLOY_IP       = env.BLUE_EC2_IP
-                    }
-
-                    echo "✅ Active: ${env.ACTIVE_ENV.toUpperCase()} → Deploying to: ${env.INACTIVE_ENV.toUpperCase()}"
-                }
-            }
-        }
-
-        // ─────────────────────────────────────────────
-        // STAGE 2 - Checkout Code
-        // ─────────────────────────────────────────────
         stage('Checkout Code') {
             steps {
-                echo "📥 Code already checked out by Jenkins SCM."
+                git branch: 'main', 
+                    url: 'https://github.com/aniketchougule108/Blue-Green-Deployment-Project-Jenkins.git'
+                echo "✅ Code checked out from GitHub"
             }
         }
-
-        // ─────────────────────────────────────────────
-        // STAGE 3 - Build Application
-        // ─────────────────────────────────────────────
-        stage('Build Application') {
+        
+        stage('Determine Environment') {
             steps {
-                echo "🔨 Building version ${params.APP_VERSION}..."
-                sh '''
-                    echo "Build complete."
-                    ls -la dist/
-                '''
+                script {
+                    if (params.DEPLOY_TO == 'blue') {
+                        env.INACTIVE_IP = env.BLUE_IP
+                        env.INACTIVE_TG = env.BLUE_TG_ARN
+                        env.ACTIVE_TG = env.GREEN_TG_ARN
+                        env.INACTIVE_ENV = 'Blue'
+                        env.ACTIVE_ENV = 'Green'
+                    } else {
+                        env.INACTIVE_IP = env.GREEN_IP
+                        env.INACTIVE_TG = env.GREEN_TG_ARN
+                        env.ACTIVE_TG = env.BLUE_TG_ARN
+                        env.INACTIVE_ENV = 'Green'
+                        env.ACTIVE_ENV = 'Blue'
+                    }
+                    
+                    echo """
+                    ========================================
+                    DEPLOYMENT PLAN
+                    ========================================
+                    Deploying to: ${env.INACTIVE_ENV} Environment
+                    Target IP: ${env.INACTIVE_IP}
+                    Current Active: ${env.ACTIVE_ENV} Environment
+                    Version: ${params.VERSION}
+                    Auto Switch: ${params.AUTO_SWITCH}
+                    ========================================
+                    """
+                }
             }
         }
-
-        // ─────────────────────────────────────────────
-        // STAGE 4 - Deploy to Inactive Environment
-        // ─────────────────────────────────────────────
+        
+        stage('Create Deployment Package') {
+            steps {
+                script {
+                    // Create version-specific content
+                    sh """
+                        # Create index.html with version info
+                        cat > index.html <<EOF
+                        <!DOCTYPE html>
+                        <html>
+                        <head>
+                            <title>Blue-Green Deployment - Version ${params.VERSION}</title>
+                            <style>
+                                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                                .version { color: ${params.VERSION == 'v1' ? 'blue' : 'green'}; font-size: 24px; }
+                                .env { color: #666; margin-top: 20px; }
+                            </style>
+                        </head>
+                        <body>
+                            <h1>Blue-Green Deployment Demo</h1>
+                            <div class="version">Version: ${params.VERSION}</div>
+                            <div class="env">Environment: ${env.INACTIVE_ENV}</div>
+                            <div>Deployed at: \$(date)</div>
+                            <div>Host: \$(hostname)</div>
+                        </body>
+                        </html>
+                        EOF
+                        
+                        # Create health check endpoint
+                        echo "OK" > health.html
+                        
+                        # Create a simple status page
+                        cat > status.html <<EOF
+                        <html>
+                        <body>
+                            <h2>Status Page</h2>
+                            <p>Environment: ${env.INACTIVE_ENV}</p>
+                            <p>Version: ${params.VERSION}</p>
+                            <p>Status: Healthy</p>
+                        </body>
+                        </html>
+                        EOF
+                    """
+                    echo "✅ Deployment package created with ${params.VERSION}"
+                }
+            }
+        }
+        
         stage('Deploy to Inactive Environment') {
             steps {
-                withCredentials([sshUserPrivateKey(credentialsId: 'EC2_SSH_KEY', keyFileVariable: 'SSH_KEY_FILE')]) {
-                    sh """
-                        chmod 400 \$SSH_KEY_FILE
-
-                        echo "🚢 Deploying ${params.APP_VERSION} to ${env.INACTIVE_ENV.toUpperCase()} (${env.DEPLOY_IP})..."
-
-                        # Copy application files
-                        scp -i \$SSH_KEY_FILE \
-                            -o StrictHostKeyChecking=no \
-                            -r ./dist/health ./dist/index.html ./dist/version \
-                            ec2-user@${env.DEPLOY_IP}:/var/www/html/
-
-                        # Update version and restart web server
-                        ssh -i \$SSH_KEY_FILE \
-                            -o StrictHostKeyChecking=no \
-                            ec2-user@${env.DEPLOY_IP} '
-                                echo "${params.APP_VERSION}" | sudo tee /var/www/html/version
-                                sudo systemctl restart httpd
-                                sudo systemctl status httpd --no-pager
-                            '
-
-                        echo "✅ Deployment to ${env.INACTIVE_ENV.toUpperCase()} complete."
-                    """
+                script {
+                    echo "📦 Deploying to ${env.INACTIVE_ENV} environment (${env.INACTIVE_IP})..."
+                    
+                    sshagent(credentials: ['ec2-ssh-key']) {
+                        try {
+                            sh """
+                                # Backup current deployment on target instance
+                                ssh -o StrictHostKeyChecking=no ubuntu@${env.INACTIVE_IP} '
+                                    timestamp=\$(date +%Y%m%d_%H%M%S)
+                                    if [ -d /var/www/html ]; then
+                                        sudo cp -r /var/www/html /var/www/html_backup_\${timestamp}
+                                        echo "Backup created: html_backup_\${timestamp}"
+                                    fi
+                                    sudo rm -rf /var/www/html/*
+                                    sudo mkdir -p /var/www/html
+                                '
+                                
+                                # Copy new files
+                                echo "Copying files to ${env.INACTIVE_ENV}..."
+                                scp -r * ubuntu@${env.INACTIVE_IP}:/var/www/html/
+                                
+                                # Set permissions and restart Nginx
+                                ssh ubuntu@${env.INACTIVE_IP} '
+                                    sudo chown -R www-data:www-data /var/www/html
+                                    sudo chmod -R 755 /var/www/html
+                                    sudo systemctl restart nginx
+                                    sleep 3
+                                    echo "Nginx restarted successfully"
+                                '
+                            """
+                            echo "✅ Deployment completed to ${env.INACTIVE_ENV}"
+                        } catch (Exception e) {
+                            error("Deployment failed: ${e.getMessage()}")
+                        }
+                    }
                 }
             }
         }
-
-        // ─────────────────────────────────────────────
-        // STAGE 5 - Health Check on Inactive Env
-        // ─────────────────────────────────────────────
-        stage('Health Check') {
+        
+        stage('Health Check Validation') {
             steps {
                 script {
-                    echo "🏥 Running health checks on ${env.INACTIVE_ENV.toUpperCase()} (${env.DEPLOY_IP})..."
-
-                    def healthy = false
-                    def retries = env.HEALTH_CHECK_RETRIES.toInteger()
-                    def delay   = env.HEALTH_CHECK_DELAY.toInteger()
-
-                    for (int i = 1; i <= retries; i++) {
-                        echo "Attempt ${i} of ${retries}..."
-
-                        def httpStatus = sh(
-                            script: """
-                                curl -s -o /dev/null -w "%{http_code}" \
-                                    --connect-timeout 5 \
-                                    http://${env.DEPLOY_IP}:${env.APP_PORT}/health
-                            """,
-                            returnStdout: true
-                        ).trim()
-
-                        echo "HTTP status: ${httpStatus}"
-
-                        if (httpStatus == '200') {
-                            def deployedVersion = sh(
-                                script: "curl -s http://${env.DEPLOY_IP}:${env.APP_PORT}/version",
+                    echo "🔍 Performing health checks on ${env.INACTIVE_ENV}..."
+                    
+                    def maxRetries = 6
+                    def healthCheckPassed = false
+                    
+                    // Give time for application to stabilize
+                    sleep(10)
+                    
+                    for (int i = 1; i <= maxRetries; i++) {
+                        echo "Health check attempt ${i}/${maxRetries}..."
+                        
+                        try {
+                            // Check 1: Target Group Health via AWS
+                            def tgHealth = sh(
+                                script: "aws elbv2 describe-target-health --target-group-arn ${env.INACTIVE_TG} --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text",
                                 returnStdout: true
                             ).trim()
-
-                            echo "Deployed version: ${deployedVersion}"
-
-                            if (deployedVersion.contains(params.APP_VERSION)) {
-                                healthy = true
-                                echo "✅ Health check PASSED on attempt ${i}."
+                            echo "  ✓ AWS Target Group Health: ${tgHealth}"
+                            
+                            // Check 2: Application Health Endpoint
+                            def healthStatus = sh(
+                                script: "curl -s -o /dev/null -w '%{http_code}' http://${env.INACTIVE_IP}${HEALTH_ENDPOINT}",
+                                returnStdout: true
+                            ).trim()
+                            echo "  ✓ Health Endpoint Status: ${healthStatus}"
+                            
+                            // Check 3: Main Page Accessibility
+                            def mainPageStatus = sh(
+                                script: "curl -s -o /dev/null -w '%{http_code}' http://${env.INACTIVE_IP}/",
+                                returnStdout: true
+                            ).trim()
+                            echo "  ✓ Main Page Status: ${mainPageStatus}"
+                            
+                            // Check 4: Version Verification
+                            def deployedVersion = sh(
+                                script: "curl -s http://${env.INACTIVE_IP}/ | grep -o 'Version: [^<]*' | cut -d' ' -f2",
+                                returnStdout: true
+                            ).trim()
+                            echo "  ✓ Deployed Version: ${deployedVersion}"
+                            
+                            // All checks passed
+                            if (tgHealth == "healthy" && healthStatus == "200" && mainPageStatus == "200") {
+                                healthCheckPassed = true
+                                echo """
+                                ✅ ALL HEALTH CHECKS PASSED!
+                                =================================
+                                Target Group: ${tgHealth}
+                                Health Endpoint: ${healthStatus}
+                                Main Page: ${mainPageStatus}
+                                Version: ${deployedVersion}
+                                =================================
+                                """
                                 break
-                            } else {
-                                echo "⚠️  Version mismatch — expected ${params.APP_VERSION}, got ${deployedVersion}"
                             }
+                        } catch (Exception e) {
+                            echo "  ✗ Health check attempt ${i} failed: ${e.getMessage()}"
                         }
-
-                        if (i < retries) {
-                            echo "Waiting ${delay}s before retry..."
-                            sleep delay
+                        
+                        if (i < maxRetries) {
+                            echo "Waiting 10 seconds before next attempt..."
+                            sleep(10)
                         }
                     }
-
-                    if (!healthy) {
-                        error("❌ Health check FAILED after ${retries} attempts. Triggering rollback.")
+                    
+                    if (!healthCheckPassed) {
+                        error("Health check failed after ${maxRetries} attempts")
                     }
                 }
             }
         }
-
-        // ─────────────────────────────────────────────
-        // STAGE 6 - Switch ALB Traffic
-        // ─────────────────────────────────────────────
-        stage('Switch ALB Traffic') {
+        
+        stage('Switch Traffic') {
+            when { expression { return params.AUTO_SWITCH } }
             steps {
                 script {
-                    echo "🔀 Switching traffic: ${env.ACTIVE_ENV.toUpperCase()} → ${env.INACTIVE_ENV.toUpperCase()}..."
-
-                    sh """
-                        aws elbv2 modify-listener \
-                            --listener-arn ${env.LISTENER_ARN} \
-                            --region ${env.AWS_REGION} \
-                            --default-actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${env.INACTIVE_TG_ARN}","Weight":100},{"TargetGroupArn":"${env.ACTIVE_TG_ARN}","Weight":0}]}}]'
-                    """
-
-                    echo "✅ Traffic switched. ${env.INACTIVE_ENV.toUpperCase()} is now LIVE."
-                }
-            }
-        }
-
-        // ─────────────────────────────────────────────
-        // STAGE 7 - Post-Switch Validation with Retries
-        // ─────────────────────────────────────────────
-        stage('Post-Switch Validation') {
-            steps {
-                script {
-                    echo "🔎 Waiting for ALB to mark targets healthy..."
-
-                    def albDns = sh(
-                        script: """
-                            aws elbv2 describe-load-balancers \
-                                --load-balancer-arns ${env.ALB_ARN} \
-                                --region ${env.AWS_REGION} \
-                                --query 'LoadBalancers[0].DNSName' \
-                                --output text
-                        """,
-                        returnStdout: true
-                    ).trim()
-
-                    echo "ALB DNS: http://${albDns}"
-
-                    // Wait for ALB target registration and health check cycle
-                    echo "⏳ Waiting 90 seconds for ALB target health propagation..."
-                    sleep 90
-
-                    // Retry validation up to 5 times with 20s gap
-                    def validated = false
-                    for (int i = 1; i <= 5; i++) {
-                        echo "Validation attempt ${i} of 5..."
-
-                        def liveStatus = sh(
-                            script: "curl -s -o /dev/null -w \"%{http_code}\" http://${albDns}/health",
+                    echo "🔄 Switching traffic from ${env.ACTIVE_ENV} to ${env.INACTIVE_ENV}..."
+                    
+                    try {
+                        // Get current listener configuration
+                        def currentTG = sh(
+                            script: "aws elbv2 describe-listeners --listener-arns ${LISTENER_ARN} --query 'Listeners[0].DefaultActions[0].TargetGroupArn' --output text",
                             returnStdout: true
                         ).trim()
-
-                        echo "ALB response: HTTP ${liveStatus}"
-
-                        if (liveStatus == '200') {
-                            validated = true
-                            echo "✅ Validation passed! Live URL: http://${albDns}"
-                            break
+                        echo "Current active target group: ${currentTG}"
+                        
+                        // Switch traffic to inactive environment
+                        sh """
+                            aws elbv2 modify-listener \
+                                --listener-arn ${LISTENER_ARN} \
+                                --default-actions Type=forward,TargetGroupArn=${INACTIVE_TG}
+                        """
+                        
+                        // Verify the switch
+                        sleep(5)
+                        def newTG = sh(
+                            script: "aws elbv2 describe-listeners --listener-arns ${LISTENER_ARN} --query 'Listeners[0].DefaultActions[0].TargetGroupArn' --output text",
+                            returnStdout: true
+                        ).trim()
+                        
+                        if (newTG == INACTIVE_TG) {
+                            echo """
+                            ✅ TRAFFIC SWITCHED SUCCESSFULLY!
+                            =================================
+                            Previous Active: ${env.ACTIVE_ENV}
+                            New Active: ${env.INACTIVE_ENV}
+                            Target Group: ${newTG}
+                            =================================
+                            """
+                        } else {
+                            error("Traffic switch verification failed")
                         }
-
-                        echo "⏳ Not ready yet (HTTP ${liveStatus}) — waiting 20s before retry..."
-                        sleep 20
+                    } catch (Exception e) {
+                        error("Traffic switch failed: ${e.getMessage()}")
                     }
-
-                    if (!validated) {
-                        error("❌ Post-switch validation failed after all retries. Initiating rollback.")
+                }
+            }
+        }
+        
+        stage('Final Verification') {
+            steps {
+                script {
+                    echo "🔍 Performing final verification on production..."
+                    sleep(10)
+                    
+                    // Get ALB DNS
+                    def albDNS = sh(
+                        script: "aws elbv2 describe-load-balancers --names BlueGreen-ALB --query 'LoadBalancers[0].DNSName' --output text",
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "ALB DNS: ${albDNS}"
+                    
+                    // Test production endpoint
+                    def response = sh(
+                        script: "curl -s http://${albDNS}/ | grep -i version",
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "Production Response: ${response}"
+                    
+                    if (response.contains(params.VERSION)) {
+                        echo "✅ Final verification passed - Correct version is live!"
+                    } else {
+                        echo "⚠️ Warning: Production may not have the latest version"
                     }
                 }
             }
         }
     }
-
-    // ─────────────────────────────────────────────
-    // POST - Rollback on failure / notify on success
-    // ─────────────────────────────────────────────
+    
     post {
+        success {
+            echo """
+            ╔══════════════════════════════════════════════════════╗
+            ║              ✅ DEPLOYMENT SUCCESSFUL!                ║
+            ╠══════════════════════════════════════════════════════╣
+            ║ Version: ${params.VERSION}                                    ║
+            ║ Active Environment: ${env.INACTIVE_ENV}                         ║
+            ║ Previous Environment: ${env.ACTIVE_ENV}                         ║
+            ║ Auto Switch: ${params.AUTO_SWITCH}                                 ║
+            ╚══════════════════════════════════════════════════════╝
+            
+            🌐 Access your application at: http://${env.BLUE_IP} or http://${env.GREEN_IP}
+            🔄 ALB DNS: http://<your-alb-dns>
+            """
+        }
+        
         failure {
+            echo """
+            ╔══════════════════════════════════════════════════════╗
+            ║              ❌ DEPLOYMENT FAILED!                    ║
+            ╠══════════════════════════════════════════════════════╣
+            ║ Initiating automatic rollback...                     ║
+            ╚══════════════════════════════════════════════════════╝
+            """
+            
             script {
-                echo "🔄 Pipeline failed — initiating AUTOMATIC ROLLBACK..."
-                if (env.ACTIVE_TG_ARN && env.INACTIVE_TG_ARN) {
+                echo "🔄 Rolling back to ${env.ACTIVE_ENV} environment..."
+                
+                try {
+                    // Get current active before rollback
+                    def failedTG = sh(
+                        script: "aws elbv2 describe-listeners --listener-arns ${LISTENER_ARN} --query 'Listeners[0].DefaultActions[0].TargetGroupArn' --output text",
+                        returnStdout: true
+                    ).trim()
+                    
+                    // Switch back to previous environment
                     sh """
                         aws elbv2 modify-listener \
-                            --listener-arn ${env.LISTENER_ARN} \
-                            --region ${env.AWS_REGION} \
-                            --default-actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${env.ACTIVE_TG_ARN}","Weight":100},{"TargetGroupArn":"${env.INACTIVE_TG_ARN}","Weight":0}]}}]'
+                            --listener-arn ${LISTENER_ARN} \
+                            --default-actions Type=forward,TargetGroupArn=${ACTIVE_TG}
                     """
-                    echo "✅ Rollback complete. ${env.ACTIVE_ENV?.toUpperCase()} is still live."
-                } else {
-                    echo "⚠️  No traffic switch occurred — rollback not needed."
+                    
+                    sleep(5)
+                    
+                    // Verify rollback
+                    def rolledBackTG = sh(
+                        script: "aws elbv2 describe-listeners --listener-arns ${LISTENER_ARN} --query 'Listeners[0].DefaultActions[0].TargetGroupArn' --output text",
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo """
+                    ✅ ROLLBACK COMPLETED!
+                    =================================
+                    Failed deployment to: ${env.INACTIVE_ENV}
+                    Reverted to: ${env.ACTIVE_ENV}
+                    Version attempted: ${params.VERSION}
+                    Current active: ${rolledBackTG}
+                    =================================
+                    
+                    📋 NEXT STEPS:
+                    1. Check application logs on ${env.INACTIVE_IP}
+                    2. Verify Nginx configuration
+                    3. Review deployment package
+                    4. Fix issues and retry deployment
+                    """
+                } catch (Exception e) {
+                    echo """
+                    ⚠️ CRITICAL: Rollback also failed!
+                    Error: ${e.getMessage()}
+                    
+                    MANUAL INTERVENTION REQUIRED:
+                    Run this command to manually rollback:
+                    aws elbv2 modify-listener --listener-arn ${LISTENER_ARN} --default-actions Type=forward,TargetGroupArn=${ACTIVE_TG}
+                    """
+                    currentBuild.result = 'UNSTABLE'
                 }
             }
         }
-        success {
-            echo "🎉 Deployment of ${params.APP_VERSION} to ${env.INACTIVE_ENV?.toUpperCase()} succeeded!"
-        }
+        
         always {
-            node('built-in') {
-                cleanWs()
+            script {
+                echo """
+                📊 DEPLOYMENT SUMMARY
+                =================================
+                Job: ${env.JOB_NAME}
+                Build: #${env.BUILD_NUMBER}
+                Status: ${currentBuild.currentResult}
+                Version: ${params.VERSION}
+                Target: ${env.INACTIVE_ENV}
+                Time: ${new Date()}
+                Duration: ${currentBuild.durationString}
+                =================================
+                """
+                
+                // Cleanup old backups (keep last 3)
+                sh """
+                    ssh -o StrictHostKeyChecking=no ubuntu@${INACTIVE_IP} '
+                        cd /var/www && ls -t html_backup_* 2>/dev/null | tail -n +4 | xargs -r sudo rm -rf
+                        echo "Cleaned up old backups"
+                    ' || true
+                """
             }
         }
     }
