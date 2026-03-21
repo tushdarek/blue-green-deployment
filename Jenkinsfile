@@ -9,7 +9,7 @@ pipeline {
 
     environment {
         // YOUR AWS RESOURCES - Update these with your actual values
-        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:loadbalancer/app/BlueGreen-ALB/c43469f376ace0e9'
+        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:listener/app/BlueGreen-ALB/c43469f376ace0e9/15b37439cafd643a'
         BLUE_TG_ARN   = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:targetgroup/TG-Blue/1b9b9dc59587436b'
         GREEN_TG_ARN  = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:targetgroup/TG-Green/00e48e7f78dbd3ac'
         
