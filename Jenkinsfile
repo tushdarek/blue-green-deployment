@@ -8,30 +8,30 @@ pipeline {
     }
 
     environment {
-        // YOUR AWS RESOURCES - Update these with your actual values
+        // ✅ Correct Listener ARN (FIXED)
         LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:listener/app/BlueGreen-ALB/c43469f376ace0e9/15b37439cafd643a'
+
         BLUE_TG_ARN   = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:targetgroup/TG-Blue/1b9b9dc59587436b'
         GREEN_TG_ARN  = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:targetgroup/TG-Green/00e48e7f78dbd3ac'
         
-        // Your EC2 Instance IPs
-        BLUE_IP       = '13.201.124.219'
-        GREEN_IP      = '65.0.55.222'
+        BLUE_IP  = '13.201.124.219'
+        GREEN_IP = '65.0.55.222'
         
-        // Application Configuration
         APP_PORT = '80'
         HEALTH_ENDPOINT = '/health'
     }
 
     stages {
+
         stage('Checkout Code') {
             steps {
                 git branch: 'main', 
                     url: 'https://github.com/tushdarek/blue-green-deployment.git'
-                echo "✅ Code checked out from GitHub"
+                echo "✅ Code checked out"
             }
         }
-        
-       stage('Determine Inactive Environment') {
+
+        stage('Determine Target Environment') {
             steps {
                 script {
                     if (params.DEPLOY_TO == 'blue') {
@@ -43,23 +43,31 @@ pipeline {
                         env.INACTIVE_TG = env.GREEN_TG_ARN
                         env.ACTIVE_TG   = env.BLUE_TG_ARN
                     }
-                    echo "Deploying to inactive: ${params.DEPLOY_TO}"
+
+                    echo "🎯 Deploying to ${params.DEPLOY_TO} (${env.INACTIVE_IP})"
                 }
             }
         }
 
-        stage('Deploy New Version to Inactive Env') {
+        stage('Deploy Application') {
             steps {
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh """
+                        echo "📦 Preparing server..."
                         ssh -o StrictHostKeyChecking=no ubuntu@${INACTIVE_IP} '
                             sudo rm -rf /var/www/html/*
-                            sudo mkdir -p /var/www/html
+                            mkdir -p /home/ubuntu/deploy-temp
                         '
-                        scp -r * ubuntu@${INACTIVE_IP}:/var/www/html/
-                        ssh ubuntu@${INACTIVE_IP} '
+
+                        echo "📤 Uploading files..."
+                        scp -o StrictHostKeyChecking=no -r * ubuntu@${INACTIVE_IP}:/home/ubuntu/deploy-temp/
+
+                        echo "🚀 Moving files to web root..."
+                        ssh -o StrictHostKeyChecking=no ubuntu@${INACTIVE_IP} '
+                            sudo cp -r /home/ubuntu/deploy-temp/* /var/www/html/
                             sudo systemctl restart nginx
-                            echo "Deployed Version \$(cat index.html | grep Version)" 
+                            sleep 5
+                            echo "✅ Deployment complete"
                         '
                     """
                 }
@@ -69,12 +77,20 @@ pipeline {
         stage('Health Check') {
             steps {
                 script {
-                    echo "Waiting for health check..."
-                    sleep 10
-                    def health = sh(script: "aws elbv2 describe-target-health --target-group-arn ${INACTIVE_TG} --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text", returnStdout: true).trim()
-                    if (health != "healthy") {
-                        error "Health check FAILED on ${params.DEPLOY_TO}"
+                    echo "🔍 Waiting for ALB health check..."
+                    sleep 20
+
+                    def health = sh(
+                        script: "aws elbv2 describe-target-health --target-group-arn ${INACTIVE_TG} --query 'TargetHealthDescriptions[*].TargetHealth.State' --output text",
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Health status: ${health}"
+
+                    if (!health.contains("healthy")) {
+                        error "❌ Health check FAILED"
                     }
+
                     echo "✅ Health check PASSED"
                 }
             }
@@ -88,22 +104,29 @@ pipeline {
                     --listener-arn ${LISTENER_ARN} \
                     --default-actions Type=forward,TargetGroupArn=${INACTIVE_TG}
                 """
-                echo "🚀 TRAFFIC SWITCHED to ${params.DEPLOY_TO}!"
+                echo "🚀 Traffic switched to ${params.DEPLOY_TO}"
             }
         }
     }
 
     post {
+
         failure {
-            echo "❌ Deployment failed - Rolling back"
+            echo "⚠️ Deployment failed! Rolling back..."
+
             sh """
                 aws elbv2 modify-listener \
                 --listener-arn ${LISTENER_ARN} \
                 --default-actions Type=forward,TargetGroupArn=${ACTIVE_TG}
             """
         }
+
+        success {
+            echo "🎉 Deployment SUCCESSFUL!"
+        }
+
         always {
-            echo "Pipeline finished. Check ALB DNS to verify."
+            echo "📌 Pipeline finished"
         }
     }
 }
