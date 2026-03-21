@@ -75,26 +75,25 @@ pipeline {
         }
 
         stage('Health Check') {
-            steps {
-                script {
-                    echo "🔍 Waiting for ALB health check..."
-                    sleep 20
+    steps {
+        script {
+            echo "🔍 Checking application directly on ${INACTIVE_IP}..."
 
-                    def health = sh(
-                        script: "aws elbv2 describe-target-health --target-group-arn ${INACTIVE_TG} --query 'TargetHealthDescriptions[*].TargetHealth.State' --output text",
-                        returnStdout: true
-                    ).trim()
+            def status = sh(
+                script: "curl -s -o /dev/null -w \"%{http_code}\" http://${INACTIVE_IP}",
+                returnStdout: true
+            ).trim()
 
-                    echo "Health status: ${health}"
+            echo "HTTP Status: ${status}"
 
-                    if (!health.contains("healthy")) {
-                        error "❌ Health check FAILED"
-                    }
-
-                    echo "✅ Health check PASSED"
-                }
+            if (status != "200") {
+                error "❌ Application is NOT healthy"
             }
+
+            echo "✅ Application is healthy"
         }
+    }
+}
 
         stage('Switch Traffic') {
             when { expression { return params.AUTO_SWITCH } }
