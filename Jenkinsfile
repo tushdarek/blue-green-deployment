@@ -7,7 +7,7 @@ pipeline {
     }
 
     environment {
-        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:listener/app/BlueGreen-ALB/fdff715c8fc7384b/98278ba4dd2f1f70'
+        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-1:098688552647:listener/app/BlueGreen-ALB/c43469f376ace0e9/15b37439cafd643a'
 
         BLUE_TG_ARN   = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:targetgroup/TG-Blue/ad4a682e102029d0'
         GREEN_TG_ARN  = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:targetgroup/TG-Green/a5e3d80cb9ca8ead'
