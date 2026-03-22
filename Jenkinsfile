@@ -12,8 +12,8 @@ pipeline {
         BLUE_TG_ARN   = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:targetgroup/TG-Blue/ad4a682e102029d0'
         GREEN_TG_ARN  = 'arn:aws:elasticloadbalancing:ap-south-1:477973726849:targetgroup/TG-Green/a5e3d80cb9ca8ead'
 
-        BLUE_IP  = '13.203.201.44'
-        GREEN_IP = '13.203.154.72'
+        BLUE_IP  = '13.201.124.219'
+        GREEN_IP = '65.0.55.222'
     }
 
     stages {
