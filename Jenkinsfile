@@ -31,7 +31,7 @@ pipeline {
             }
         }
 
-        stage('Determine Target Environment') {
+    stage('Determine Inactive Environment') {
             steps {
                 script {
                     if (params.DEPLOY_TO == 'blue') {
@@ -43,31 +43,23 @@ pipeline {
                         env.INACTIVE_TG = env.GREEN_TG_ARN
                         env.ACTIVE_TG   = env.BLUE_TG_ARN
                     }
-
-                    echo "🎯 Deploying to ${params.DEPLOY_TO} (${env.INACTIVE_IP})"
+                    echo "Deploying to inactive: ${params.DEPLOY_TO}"
                 }
             }
         }
 
-        stage('Deploy Application') {
+        stage('Deploy New Version to Inactive Env') {
             steps {
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh """
-                        echo "📦 Preparing server..."
                         ssh -o StrictHostKeyChecking=no ubuntu@${INACTIVE_IP} '
                             sudo rm -rf /var/www/html/*
-                            mkdir -p /home/ubuntu/deploy-temp
+                            sudo mkdir -p /var/www/html
                         '
-
-                        echo "📤 Uploading files..."
-                        scp -o StrictHostKeyChecking=no -r * ubuntu@${INACTIVE_IP}:/home/ubuntu/deploy-temp/
-
-                        echo "🚀 Moving files to web root..."
-                        ssh -o StrictHostKeyChecking=no ubuntu@${INACTIVE_IP} '
-                            sudo cp -r /home/ubuntu/deploy-temp/* /var/www/html/
+                        scp -r * ubuntu@${INACTIVE_IP}:/var/www/html/
+                        ssh ubuntu@${INACTIVE_IP} '
                             sudo systemctl restart nginx
-                            sleep 5
-                            echo "✅ Deployment complete"
+                            echo "Deployed Version \$(cat index.html | grep Version)" 
                         '
                     """
                 }
@@ -75,25 +67,18 @@ pipeline {
         }
 
         stage('Health Check') {
-    steps {
-        script {
-            echo "🔍 Checking application directly on ${INACTIVE_IP}..."
-
-            def status = sh(
-                script: "curl -s -o /dev/null -w \"%{http_code}\" http://${INACTIVE_IP}",
-                returnStdout: true
-            ).trim()
-
-            echo "HTTP Status: ${status}"
-
-            if (status != "200") {
-                error "❌ Application is NOT healthy"
+            steps {
+                script {
+                    echo "Waiting for health check..."
+                    sleep 10
+                    def health = sh(script: "aws elbv2 describe-target-health --target-group-arn ${INACTIVE_TG} --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text", returnStdout: true).trim()
+                    if (health != "healthy") {
+                        error "Health check FAILED on ${params.DEPLOY_TO}"
+                    }
+                    echo "✅ Health check PASSED"
+                }
             }
-
-            echo "✅ Application is healthy"
         }
-    }
-}
 
         stage('Switch Traffic') {
             when { expression { return params.AUTO_SWITCH } }
@@ -103,29 +88,22 @@ pipeline {
                     --listener-arn ${LISTENER_ARN} \
                     --default-actions Type=forward,TargetGroupArn=${INACTIVE_TG}
                 """
-                echo "🚀 Traffic switched to ${params.DEPLOY_TO}"
+                echo "🚀 TRAFFIC SWITCHED to ${params.DEPLOY_TO}!"
             }
         }
     }
 
     post {
-
         failure {
-            echo "⚠️ Deployment failed! Rolling back..."
-
+            echo "❌ Deployment failed - Rolling back"
             sh """
                 aws elbv2 modify-listener \
                 --listener-arn ${LISTENER_ARN} \
                 --default-actions Type=forward,TargetGroupArn=${ACTIVE_TG}
             """
         }
-
-        success {
-            echo "🎉 Deployment SUCCESSFUL!"
-        }
-
         always {
-            echo "📌 Pipeline finished"
+            echo "Pipeline finished. Check ALB DNS to verify."
         }
     }
 }
